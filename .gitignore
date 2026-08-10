@@ -1,0 +1,19 @@
+# MounRiver / GCC build output
+/obj/
+*.o
+*.d
+*.hex
+*.map
+*.lst
+*.elf
+*.siz
+
+# Reference SDK (local only, not part of this project)
+/_ref_ch32v20x/
+
+# IDE / local
+/.mrs/*.snapshot
+/.cursor/
+
+# Optional local scripts
+/scripts/

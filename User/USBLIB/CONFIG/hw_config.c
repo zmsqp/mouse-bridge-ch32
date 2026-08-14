@@ -57,6 +57,8 @@ void Set_USBConfig( )
         RCC_USBCLKConfig( RCC_USBCLKSource_PLLCLK_Div2 );
     }
     RCC_APB1PeriphClockCmd(RCC_APB1Periph_USB, ENABLE);
+    /* USBFS Host 与 USBD 共享 48MHz USB 时钟，boot 时一次性配置，运行中不再改 */
+    RCC_AHBPeriphClockCmd(RCC_AHBPeriph_USBFS, ENABLE);
 }
 
 void Enter_LowPowerMode(void)

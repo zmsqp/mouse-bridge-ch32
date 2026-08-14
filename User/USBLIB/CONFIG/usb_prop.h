@@ -73,6 +73,7 @@ uint8_t *USBD_GetConfigDescriptor(uint16_t);
 uint8_t *USBD_GetStringDescriptor(uint16_t);
 uint8_t *USBD_GetReportDescriptor(uint16_t);
 uint8_t *HID_Set_Report(uint16_t);
+uint8_t *HID_Get_Report(uint16_t);
 uint8_t *HID_Get_Idle(uint16_t);
 uint8_t *HID_Get_Protocol(uint16_t);
 #ifdef __cplusplus

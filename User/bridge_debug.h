@@ -26,8 +26,12 @@ void BridgeDebug_IsrPush(uint8_t ev, uint8_t arg0, uint16_t arg1);
 void BridgeDebug_Flush(void);
 void BridgeDebug_Tick(void);
 void BridgeDebug_LogHostEnum(uint8_t ok, uint8_t err_code);
+void BridgeDebug_LogHostInterface(uint8_t intf, uint8_t type, uint8_t in_num,
+                                  uint8_t ep, uint16_t ep_size, uint8_t interval,
+                                  uint8_t report_id);
 void BridgeDebug_LogMouseReady(uint8_t intf, uint16_t ep_size, uint8_t report_id);
 void BridgeDebug_LogForward(const uint8_t *data, uint16_t len, uint8_t sent);
+void BridgeDebug_LogDrop(const char *why, const uint8_t *data, uint16_t len);
 void BridgeDebug_LogPcHostReady(void);
 
 void RESET_Callback(void);
@@ -45,8 +49,10 @@ void WKUP_Callback(void);
 #define BridgeDebug_Flush()             do {} while(0)
 #define BridgeDebug_Tick()              do {} while(0)
 #define BridgeDebug_LogHostEnum(a,b)    do {} while(0)
+#define BridgeDebug_LogHostInterface(a,b,c,d,e,f,g) do {} while(0)
 #define BridgeDebug_LogMouseReady(a,b,c) do {} while(0)
 #define BridgeDebug_LogForward(a,b,c)   do {} while(0)
+#define BridgeDebug_LogDrop(a,b,c)      do {} while(0)
 #define BridgeDebug_LogPcHostReady()    do {} while(0)
 #define RESET_Callback()                do {} while(0)
 #define ERR_Callback()                  do {} while(0)

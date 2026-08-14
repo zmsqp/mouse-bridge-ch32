@@ -29,7 +29,7 @@
 /* EP1  */
 /* tx buffer base address */
 #define ENDP1_TXADDR        (0xC0)
-#define ENDP2_TXADDR        (ENDP1_TXADDR + 0x10)
+#define ENDP2_TXADDR        (ENDP1_TXADDR + 0x40)
 
 /* ISTR events */
 /* IMR_MSK */
@@ -67,7 +67,6 @@
 #define  EP7_OUT_Callback   NOP_Process
 
 #endif /* __USB_CONF_H */
-
 
 
 

@@ -126,7 +126,7 @@ void USART_Printf_Init(uint32_t baudrate)
     USART_InitStructure.USART_StopBits = USART_StopBits_1;
     USART_InitStructure.USART_Parity = USART_Parity_No;
     USART_InitStructure.USART_HardwareFlowControl = USART_HardwareFlowControl_None;
-    USART_InitStructure.USART_Mode = USART_Mode_Tx;
+    USART_InitStructure.USART_Mode = USART_Mode_Tx | USART_Mode_Rx;
 
 #if(DEBUG == DEBUG_UART1)
     USART_Init(USART1, &USART_InitStructure);

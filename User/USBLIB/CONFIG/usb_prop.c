@@ -16,12 +16,13 @@
 #include "usb_pwr.h"
 #include "hw_config.h"
 #include "bridge_debug.h"
+#include "bridge_usb_cfg.h"
 
 
 uint8_t Request = 0;
 
 extern uint8_t USBD_Endp1_Busy,USBD_Endp2_Busy;
-volatile uint8_t HIDReportOut[8] = {0};
+volatile uint8_t HIDReportOut[32] = {0};
 volatile uint8_t USBD_Sleep_Status = 0x00;
 volatile uint8_t HID_Idle_Value[2] = {0};
 volatile uint8_t HID_Protocol_Value[2] = {0};
@@ -83,8 +84,8 @@ ONE_DESCRIPTOR String_Descriptor[4] =
 
 ONE_DESCRIPTOR Report_Descriptor[2] =
 {
-	{(uint8_t*)USBD_KeyRepDesc, USBD_SIZE_REPORT_DESC_KB},
 	{(uint8_t*)USBD_MouseRepDesc, USBD_SIZE_REPORT_DESC_MS},
+	{(uint8_t*)USBD_InjectMouseRepDesc, USBD_SIZE_REPORT_DESC_INJECT},
 };
 
 ONE_DESCRIPTOR Hid_Descriptor[2] =
@@ -169,7 +170,7 @@ void USBD_Status_In(void)
  */
 void USBD_Status_Out(void)
 {
-    
+    /* USB 配置通道已关闭，不再处理 HID SET_REPORT */
 }
 
 /*******************************************************************************
@@ -306,12 +307,16 @@ uint8_t *USBD_GetStringDescriptor(uint16_t Length)
 uint8_t *USBD_GetReportDescriptor(uint16_t Length)
 {
   uint8_t wIndex0 = pInformation->USBwIndexs.bw.bb0;
-  if (wIndex0 > 2)
+  if (wIndex0 > 1)
   {
     return NULL;
   }
   else
   {
+    if(wIndex0 == 0)
+    {
+      Report_Descriptor[0].Descriptor_Size = USBD_MouseRepDesc_Len;
+    }
     return Standard_GetDescriptorData(Length, &Report_Descriptor[wIndex0]);
   }
 }
@@ -328,7 +333,7 @@ uint8_t *USBD_GetReportDescriptor(uint16_t Length)
 uint8_t *USBD_GetHidDescriptor(uint16_t Length)
 {
   uint8_t wIndex0 = pInformation->USBwIndexs.bw.bb0;
-  if (wIndex0 > 2)
+  if (wIndex0 > 1)
   {
     return NULL;
   }
@@ -409,7 +414,8 @@ RESULT USBD_Data_Setup(uint8_t RequestNo)
   {
     if (Request_No == HID_GET_REPORT)
     {
-      /* HID Get Report */
+      /* 描述符无 Feature Report，拒绝 GET_REPORT 避免 Windows 驱动异常 */
+      return USB_UNSUPPORT;
     }
     else if (Request_No == HID_GET_IDLE)
     {
@@ -423,16 +429,8 @@ RESULT USBD_Data_Setup(uint8_t RequestNo)
     }  
     else if (Request_No == HID_SET_REPORT)
     {
-      if (pInformation->USBwLengths.w > 1)
-      {
-        return USB_UNSUPPORT;
-      }
-      else
-      {
-        pInformation->Ctrl_Info.Usb_wLength = pInformation->USBwLengths.w;
-        pInformation->Ctrl_Info.CopyData = &HID_Set_Report;
-        pInformation->ControlState = OUT_DATA;
-      }
+      /* 描述符无 Feature Report，拒绝 SET_REPORT */
+      return USB_UNSUPPORT;
     }
     else
     {
@@ -459,7 +457,7 @@ RESULT USBD_NoData_Setup(uint8_t RequestNo)
   {
     if (Request_No == HID_SET_IDLE)
     {
-      if (wIndex0 > 2)
+      if (wIndex0 > 1)
       {
         return USB_UNSUPPORT;
       }
@@ -471,7 +469,7 @@ RESULT USBD_NoData_Setup(uint8_t RequestNo)
     }
     else if (Request_No == HID_SET_PROTOCOL)
     {
-      if (wIndex0 > 2)
+      if (wIndex0 > 1)
       {
         return USB_UNSUPPORT;
       }
@@ -498,6 +496,13 @@ RESULT USBD_NoData_Setup(uint8_t RequestNo)
  *
  * @return  HIDReportOut.
  */
+uint8_t *HID_Get_Report(uint16_t Length)
+{
+  (void)Length;
+  BridgeUsbCfg_FillFeatureReport((uint8_t *)&HIDReportOut[0], sizeof(HIDReportOut));
+  return (uint8_t *)&HIDReportOut;
+}
+
 uint8_t *HID_Set_Report(uint16_t Length)
 {
   uint8_t wIndex0 = pInformation->USBwIndexs.bw.bb0;

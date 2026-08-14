@@ -5,7 +5,7 @@
 
 #define DEF_FILE_VERSION             0x01
 #define DEF_USB_VID                  0x1A86
-#define DEF_USB_PID                  0xFE00
+#define DEF_USB_PID                  0xFE01
 #define DEF_IC_PRG_VER               DEF_FILE_VERSION
 
 #define DEF_USBD_UEP0_SIZE           64

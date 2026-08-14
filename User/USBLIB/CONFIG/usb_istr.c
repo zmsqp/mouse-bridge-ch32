@@ -159,7 +159,7 @@ void USB_Istr(void)
     {
       esof_counter ++;
       
-      if ((esof_counter >3)&&((_GetCNTR()&CNTR_FSUSP)==0))
+      if (fSuspendEnabled && (esof_counter >3)&&((_GetCNTR()&CNTR_FSUSP)==0))
       {           
 
         wCNTR = _GetCNTR(); 

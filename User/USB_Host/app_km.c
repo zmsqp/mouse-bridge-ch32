@@ -189,7 +189,7 @@ uint8_t USBH_EnumRootDevice( void )
     enum_cnt = 0;
 ENUM_START:
     /* Delay and wait for the device to stabilize */
-    Delay_Ms( 100 );
+    Delay_Ms( 20 );
     enum_cnt++;
     Delay_Ms( 8 << enum_cnt );
 
@@ -400,6 +400,12 @@ uint8_t KM_AnalyzeConfigDesc( uint8_t index, uint8_t ep0_size  )
                                     HostCtl[ index ].Interface[ num ].InEndpSize[ innum ] = ( (PUSB_ENDP_DESCR)( &Com_Buf[ i ] ) )->wMaxPacketSizeL +
                                                                               (uint16_t)( ( ( (PUSB_ENDP_DESCR)( &Com_Buf[ i ] ) )->wMaxPacketSizeH) << 8);
                                     HostCtl[ index ].Interface[ num ].InEndpInterval[ innum ] = ( (PUSB_ENDP_DESCR)( &Com_Buf[ i ] ) )->bInterval;
+                                    if(HostCtl[ index ].Interface[ num ].Type == DEC_MOUSE &&
+                                       HostCtl[ index ].Interface[ num ].InEndpInterval[ innum ] > 1U)
+                                    {
+                                        /* 统一按 1ms 轮询，兼容高回报率鼠标 */
+                                        HostCtl[ index ].Interface[ num ].InEndpInterval[ innum ] = 1U;
+                                    }
                                     HostCtl[ index ].Interface[ num ].InEndpNum++;
                                     
                                     innum++;
@@ -690,10 +696,17 @@ GETREP_START:
                             HostCtl[ index ].Interface[ num ].InEndpSize[ 0 ],
                             HostCtl[ index ].Interface[ num ].InEndpInterval[ 0 ] );
                     }
-                    /* 尝试 Boot 协议，简化报告格式 */
-                    HID_SetProtocol( ep0_size, num, 0 );
                     MouseBridge_OnHostReady();
                 }
+
+                BridgeDebug_LogHostInterface(
+                    num,
+                    HostCtl[ index ].Interface[ num ].Type,
+                    HostCtl[ index ].Interface[ num ].InEndpNum,
+                    HostCtl[ index ].Interface[ num ].InEndpAddr[ 0 ],
+                    HostCtl[ index ].Interface[ num ].InEndpSize[ 0 ],
+                    HostCtl[ index ].Interface[ num ].InEndpInterval[ 0 ],
+                    HostCtl[ index ].Interface[ num ].ReportID );
 
                 num_tmp--;
             }
@@ -908,6 +921,11 @@ uint8_t HUB_AnalyzeConfigDesc( uint8_t index )
                                 HostCtl[ index ].Interface[ 0 ].InEndpSize[ 0 ] = ( (PUSB_ENDP_DESCR)( &Com_Buf[ i ] ) )->wMaxPacketSizeL + \
                                                                                   (uint16_t)( ( ( (PUSB_ENDP_DESCR)( &Com_Buf[ i ] ) )->wMaxPacketSizeH ) << 8 );
                                 HostCtl[ index ].Interface[ 0 ].InEndpInterval[ 0 ] = ( (PUSB_ENDP_DESCR)( &Com_Buf[ i ] ) )->bInterval;
+                                if(HostCtl[ index ].Interface[ 0 ].Type == DEC_MOUSE &&
+                                   HostCtl[ index ].Interface[ 0 ].InEndpInterval[ 0 ] > 1U)
+                                {
+                                    HostCtl[ index ].Interface[ 0 ].InEndpInterval[ 0 ] = 1U;
+                                }
                                 HostCtl[ index ].Interface[ 0 ].InEndpNum++;
                             }
 
@@ -1892,4 +1910,3 @@ void USBH_MainDeal( void )
         }
     }
 }
-

@@ -9,7 +9,6 @@
 #define MOUSE_BRIDGE_VERBOSE_LAYOUT  0
 #define MOUSE_BRIDGE_STATUS_UART     1
 #define MOUSE_BRIDGE_RAW_QUEUE_SIZE  64U
-#define MOUSE_BRIDGE_LBTN_KEEPALIVE_MS  20U
 
 #if (USB_PC_PORT == USB_PC_PORT_USBFS)
 #include "ch32v20x_usbfs_device.h"
@@ -64,7 +63,6 @@ static uint8_t g_pending_wheel_reports;
 
 #define RECOIL_INJECT_INTERVAL_MS  2U
 #define PRIMARY_BUTTON_MASK        0x07U
-#define SIDE_BUTTON_MASK           0xF8U
 #define AIM_TOGGLE_DEFAULT_MASK    0x10U
 #define AIM_TOGGLE_DEBOUNCE_MS     180U
 
@@ -75,15 +73,18 @@ static uint8_t g_current_buttons;
 static uint8_t g_forward_buttons;
 static uint8_t g_lbtn_was_down;
 static uint32_t g_lbtn_down_ms;
-static int16_t g_dx_accum_x10;
-static int16_t g_dy_accum_x10;
+static int16_t g_dx_accum_x100;
+static int16_t g_dy_accum_x100;
+/* Compensation accepted by the motion endpoint but not sent yet. */
+static int16_t g_pending_inject_dx;
+static int16_t g_pending_inject_dy;
+/* Compensation that has actually reached the PC in this firing session. */
 static int16_t g_session_inject_dx;
 static int16_t g_session_inject_dy;
 static uint32_t g_recoil_start_ms;
 static uint8_t g_recoil_stage_index;
-static int16_t g_springback_dx;
-static int16_t g_springback_dy;
 static uint8_t g_springback_active;
+static uint8_t g_recoil_exhausted;
 static MouseBridgeStage g_zero_stage;
 static uint32_t g_stream_last_ms;
 static uint32_t g_last_inject_ms;
@@ -97,15 +98,9 @@ static uint16_t g_raw_queue_len[MOUSE_BRIDGE_RAW_QUEUE_SIZE];
 static uint8_t g_raw_q_read;
 static uint8_t g_raw_q_write;
 static uint8_t g_raw_q_count;
-static uint8_t g_last_raw_data[MOUSE_BRIDGE_REPORT_MAX];
-static uint16_t g_last_raw_len;
-static uint32_t g_last_raw_ms;
-static uint32_t g_last_lbtn_keepalive_ms;
-
 static void MouseBridge_TryFlush(void);
 static void MouseBridge_TryFlushRaw(void);
 static void MouseBridge_TryForwardRaw(const uint8_t *data, uint16_t len);
-static void MouseBridge_TryLbtnKeepalive(void);
 static void MouseBridge_AccumMotion(int16_t dx, int16_t dy, uint8_t buttons, int8_t wheel, uint8_t update_wheel);
 static int8_t MouseBridge_ClampAxis(int16_t value);
 static void MouseBridge_ApplyDefaultLayout(void);
@@ -118,12 +113,24 @@ static uint8_t MouseBridge_ExtractBootPayload(const uint8_t *payload, uint16_t p
 static uint32_t MouseBridge_ReadBits(const uint8_t *p, uint16_t plen, uint16_t bit, uint8_t size);
 static int16_t MouseBridge_ReadSignedBits(const uint8_t *p, uint16_t plen, uint16_t bit, uint8_t size);
 static void MouseBridge_ResetRecoilAccum(void);
+static void MouseBridge_DropPendingInject(void);
 static void MouseBridge_CancelSpringback(void);
 static void MouseBridge_ResetRecoilSession(void);
+static void MouseBridge_StartSpringback(void);
+static void MouseBridge_TickSpringback(void);
+static const MouseBridgeStage *MouseBridge_CurrentStage(void);
 static void MouseBridge_LogRawReport(const uint8_t *data, uint16_t len,
                                      uint8_t parsed, uint8_t buttons,
                                      int16_t dx, int16_t dy, int8_t wheel);
-static uint8_t MouseBridge_SelectSideButton(uint8_t pressed);
+
+static int16_t MouseBridge_RoundX100ToX10(int16_t value)
+{
+    if(value >= 0)
+    {
+        return (int16_t)((value + 5) / 10);
+    }
+    return (int16_t)((value - 5) / 10);
+}
 
 static void MouseBridge_NotifyAimChange(void)
 {
@@ -204,37 +211,6 @@ static void MouseBridge_LogRawReport(const uint8_t *data, uint16_t len,
     printf("\r\n");
 }
 
-static uint8_t MouseBridge_SelectSideButton(uint8_t pressed)
-{
-    uint8_t side = (uint8_t)(pressed & SIDE_BUTTON_MASK);
-
-    if(side == 0U)
-    {
-        return 0U;
-    }
-    if(side & AIM_TOGGLE_DEFAULT_MASK)
-    {
-        return AIM_TOGGLE_DEFAULT_MASK;
-    }
-    if(side & 0x08U)
-    {
-        return 0x08U;
-    }
-    if(side & 0x20U)
-    {
-        return 0x20U;
-    }
-    if(side & 0x40U)
-    {
-        return 0x40U;
-    }
-    if(side & 0x80U)
-    {
-        return 0x80U;
-    }
-    return side;
-}
-
 void MouseBridge_Init(void)
 {
     g_aim_btn_was_down = 0;
@@ -251,18 +227,19 @@ void MouseBridge_Init(void)
     g_forward_buttons = 0;
     g_lbtn_was_down = 0;
     g_lbtn_down_ms = 0;
-    g_dx_accum_x10 = 0;
-    g_dy_accum_x10 = 0;
+    g_dx_accum_x100 = 0;
+    g_dy_accum_x100 = 0;
+    g_pending_inject_dx = 0;
+    g_pending_inject_dy = 0;
     g_session_inject_dx = 0;
     g_session_inject_dy = 0;
     g_recoil_start_ms = 0;
     g_recoil_stage_index = 0;
-    g_springback_dx = 0;
-    g_springback_dy = 0;
     g_springback_active = 0;
+    g_recoil_exhausted = 0;
     g_zero_stage.duration_ms = 0U;
-    g_zero_stage.dx_x10 = 0;
-    g_zero_stage.dy_x10 = 0;
+    g_zero_stage.dx_x100 = 0;
+    g_zero_stage.dy_x100 = 0;
     g_last_inject_ms = 0;
     g_inject_div = 0;
     g_raw_debug = 0;
@@ -272,11 +249,9 @@ void MouseBridge_Init(void)
     g_raw_q_read = 0;
     g_raw_q_write = 0;
     g_raw_q_count = 0;
-    g_last_raw_len = 0;
-    g_last_raw_ms = 0;
-    g_last_lbtn_keepalive_ms = 0;
-
     BridgeFlash_Load(&g_cfg);
+    /* Returning to the firing anchor is a required safety invariant. */
+    g_cfg.recoil_springback = 1U;
     MouseBridge_ApplyDefaultLayout();
 #if (USB_PC_PORT == USB_PC_PORT_USBD)
     USBD_LoadDefaultReportDescriptor();
@@ -323,16 +298,18 @@ void MouseBridge_CloneDeviceDescriptor(const uint8_t *src)
 
 void MouseBridge_OnParamsChanged(void)
 {
+    g_cfg.recoil_springback = 1U;
     MouseBridge_ResetRecoilAccum();
     MouseBridge_CancelSpringback();
     MouseBridge_ResetRecoilSession();
+    g_recoil_exhausted = 0U;
     g_cfg.hotkey_active = 0;
     if(g_cfg.stage_count == 0U || g_cfg.stage_count > MOUSE_BRIDGE_PROFILE_STAGES)
     {
         g_cfg.stage_count = 1U;
     }
-    g_cfg.modify_dx = g_cfg.stages[0].dx_x10;
-    g_cfg.modify_dy = g_cfg.stages[0].dy_x10;
+    g_cfg.modify_dx = MouseBridge_RoundX100ToX10(g_cfg.stages[0].dx_x100);
+    g_cfg.modify_dy = MouseBridge_RoundX100ToX10(g_cfg.stages[0].dy_x100);
 
     if(!g_cfg.enabled)
     {
@@ -746,7 +723,7 @@ static uint8_t MouseBridge_ModifyActive(void)
 
     for(i = 0; i < g_cfg.stage_count && i < MOUSE_BRIDGE_PROFILE_STAGES; i++)
     {
-        if(g_cfg.stages[i].dx_x10 != 0 || g_cfg.stages[i].dy_x10 != 0)
+        if(g_cfg.stages[i].dx_x100 != 0 || g_cfg.stages[i].dy_x100 != 0)
         {
             return 1U;
         }
@@ -790,97 +767,116 @@ void MouseBridge_BuildConfigDescriptor(void)
 
 static void MouseBridge_ResetRecoilAccum(void)
 {
-    g_dx_accum_x10 = 0;
-    g_dy_accum_x10 = 0;
+    g_dx_accum_x100 = 0;
+    g_dy_accum_x100 = 0;
+}
+
+static void MouseBridge_DropPendingInject(void)
+{
+    /*
+     * Only motion accepted by the PC may be undone.  Remove compensation that
+     * is still waiting on the synthetic endpoint before taking the anchor
+     * snapshot, otherwise release can first flush one last downward packet.
+     */
+    g_motion_dx = (int16_t)(g_motion_dx - g_pending_inject_dx);
+    g_motion_dy = (int16_t)(g_motion_dy - g_pending_inject_dy);
+    g_pending_inject_dx = 0;
+    g_pending_inject_dy = 0;
+    if(g_motion_dx == 0 && g_motion_dy == 0 && g_out_wheel == 0)
+    {
+        g_motion_dirty = 0U;
+    }
 }
 
 static void MouseBridge_CancelSpringback(void)
 {
+    if(g_springback_active)
+    {
+        /* Queued springback belongs to the cancelled session. */
+        g_motion_dx = 0;
+        g_motion_dy = 0;
+        if(g_out_wheel == 0)
+        {
+            g_motion_dirty = 0U;
+        }
+    }
     g_springback_active = 0U;
-    g_springback_dx = 0;
-    g_springback_dy = 0;
 }
 
 static void MouseBridge_ResetRecoilSession(void)
 {
+    MouseBridge_DropPendingInject();
     g_session_inject_dx = 0;
     g_session_inject_dy = 0;
     g_recoil_start_ms = 0;
     g_recoil_stage_index = 0;
+    g_inject_div = 0;
     MouseBridge_ResetRecoilAccum();
+}
+
+static int16_t MouseBridge_SatAdd16(int16_t base, int8_t delta)
+{
+    int32_t sum = (int32_t)base + (int32_t)delta;
+    if(sum > 32767)
+    {
+        return 32767;
+    }
+    if(sum < -32768)
+    {
+        return (int16_t)(-32768);
+    }
+    return (int16_t)sum;
 }
 
 static void MouseBridge_TrackSessionInject(int8_t dx, int8_t dy)
 {
-    g_session_inject_dx = (int16_t)(g_session_inject_dx + dx);
-    g_session_inject_dy = (int16_t)(g_session_inject_dy + dy);
+    g_session_inject_dx = MouseBridge_SatAdd16(g_session_inject_dx, dx);
+    g_session_inject_dy = MouseBridge_SatAdd16(g_session_inject_dy, dy);
 }
 
 static void MouseBridge_StartSpringback(void)
 {
-    if(!g_cfg.recoil_springback)
+    int16_t return_dx;
+    int16_t return_dy;
+
+    if(g_springback_active)
     {
-        MouseBridge_ResetRecoilSession();
         return;
     }
+    g_cfg.hotkey_active = 0;
+    MouseBridge_DropPendingInject();
 
     if(g_session_inject_dx == 0 && g_session_inject_dy == 0)
     {
         return;
     }
 
-    g_springback_dx = (int16_t)(-g_session_inject_dx);
-    g_springback_dy = (int16_t)(-g_session_inject_dy);
+    /*
+     * This is an anchor reset, not a recoil-recovery animation.  Queue the
+     * complete inverse displacement in the button-release event itself.  USB
+     * can split it into signed 8-bit reports, but no easing/delay is allowed:
+     * the destination is the left-button-down firing coordinate.
+     */
+    return_dx = (g_session_inject_dx == (int16_t)-32768) ? 32767 : (int16_t)(-g_session_inject_dx);
+    return_dy = (g_session_inject_dy == (int16_t)-32768) ? 32767 : (int16_t)(-g_session_inject_dy);
     g_session_inject_dx = 0;
     g_session_inject_dy = 0;
     g_springback_active = 1U;
+    g_inject_div = 0;
+    g_cfg.hotkey_active = 0;
     MouseBridge_ResetRecoilAccum();
+    MouseBridge_AccumMotion(return_dx, return_dy, 0U, 0, 0U);
 }
 
 static void MouseBridge_TickSpringback(void)
 {
-    int8_t dx;
-    int8_t dy;
-
     if(!g_springback_active)
     {
         return;
     }
 
-    dx = MouseBridge_ClampAxis(g_springback_dx);
-    dy = MouseBridge_ClampAxis(g_springback_dy);
-
-    if(dx == 0 && dy == 0)
-    {
-        if(g_springback_dx > 0)
-        {
-            dx = 1;
-        }
-        else if(g_springback_dx < 0)
-        {
-            dx = -1;
-        }
-        if(g_springback_dy > 0)
-        {
-            dy = 1;
-        }
-        else if(g_springback_dy < 0)
-        {
-            dy = -1;
-        }
-    }
-
-    if(dx == 0 && dy == 0)
-    {
-        g_springback_active = 0U;
-        return;
-    }
-
-    MouseBridge_AccumMotion(dx, dy, 0U, 0, 0U);
-    g_springback_dx = (int16_t)(g_springback_dx - dx);
-    g_springback_dy = (int16_t)(g_springback_dy - dy);
-
-    if(g_springback_dx == 0 && g_springback_dy == 0)
+    /* Full reset was queued at release; only wait for USB to drain it. */
+    if(g_motion_dx == 0 && g_motion_dy == 0)
     {
         g_springback_active = 0U;
     }
@@ -889,37 +885,41 @@ static void MouseBridge_TickSpringback(void)
 static void MouseBridge_HandleButtons(uint8_t buttons)
 {
     uint8_t lbtn = (uint8_t)(buttons & 0x01U);
-    uint8_t pressed = (uint8_t)(buttons & (uint8_t)~g_current_buttons);
-    uint8_t side_pressed = MouseBridge_SelectSideButton(pressed);
     uint8_t aim_btn;
     uint32_t now = BridgeTime_GetMs();
     uint8_t aim_debounce_ok = (g_last_aim_toggle_ms == 0U ||
                                (now - g_last_aim_toggle_ms) >= AIM_TOGGLE_DEBOUNCE_MS);
 
-    if(side_pressed != 0U && aim_debounce_ok)
+    g_aim_button_mask = AIM_TOGGLE_DEFAULT_MASK;
+    aim_btn = (uint8_t)((buttons & AIM_TOGGLE_DEFAULT_MASK) ? 1U : 0U);
+    if(aim_btn && !g_aim_btn_was_down && aim_debounce_ok)
     {
-        g_aim_button_mask = side_pressed;
         g_cfg.aim_active = g_cfg.aim_active ? 0U : 1U;
         g_last_aim_toggle_ms = now;
         MouseBridge_NotifyAimChange();
     }
-    else
-    {
-        aim_btn = (uint8_t)((buttons & g_aim_button_mask) ? 1U : 0U);
-        if(aim_btn && !g_aim_btn_was_down && aim_debounce_ok)
-        {
-            g_cfg.aim_active = g_cfg.aim_active ? 0U : 1U;
-            g_last_aim_toggle_ms = now;
-            MouseBridge_NotifyAimChange();
-        }
-    }
 
-    aim_btn = (uint8_t)((buttons & g_aim_button_mask) ? 1U : 0U);
     g_aim_btn_was_down = aim_btn;
 
     if(lbtn && !g_lbtn_was_down)
     {
         g_lbtn_down_ms = now;
+        g_recoil_exhausted = 0U;
+    }
+    else if(!lbtn && g_lbtn_was_down)
+    {
+        /* 左键松开当帧停补并回退，不等 1ms 定时器。 */
+        if(g_cfg.enabled && g_cfg.aim_active &&
+           (g_session_inject_dx != 0 || g_session_inject_dy != 0 ||
+            g_pending_inject_dx != 0 || g_pending_inject_dy != 0))
+        {
+            uint8_t was_active = g_cfg.hotkey_active;
+            MouseBridge_StartSpringback();
+            if(was_active != g_cfg.hotkey_active)
+            {
+                MouseBridge_NotifyHotkeyChange();
+            }
+        }
     }
 
     g_lbtn_was_down = lbtn;
@@ -942,7 +942,16 @@ static void MouseBridge_TickRecoilLogic(void)
     {
         uint32_t held = now - g_lbtn_down_ms;
 
-        if(held >= g_cfg.hotkey_hold_ms)
+        if(g_recoil_exhausted)
+        {
+            /* A finished magazine stays stopped until the trigger is released. */
+            g_cfg.hotkey_active = 0U;
+        }
+        else if(g_springback_active)
+        {
+            g_cfg.hotkey_active = 0;
+        }
+        else if(held >= g_cfg.hotkey_hold_ms)
         {
             g_cfg.hotkey_active = MouseBridge_ModifyActive() ? 1U : 0U;
         }
@@ -956,14 +965,27 @@ static void MouseBridge_TickRecoilLogic(void)
             MouseBridge_CancelSpringback();
             MouseBridge_ResetRecoilSession();
         }
+
+        /* 弹匣轨迹走完即回正；即使左键仍按住，也不能停在压低位置。 */
+        if(g_cfg.hotkey_active && g_recoil_start_ms != 0U)
+        {
+            if(MouseBridge_CurrentStage() == &g_zero_stage)
+            {
+                g_recoil_exhausted = 1U;
+                g_cfg.hotkey_active = 0U;
+                MouseBridge_ResetRecoilAccum();
+                MouseBridge_StartSpringback();
+            }
+        }
     }
     else
     {
-        if(prev_active)
+        if(prev_active && !g_springback_active)
         {
             MouseBridge_StartSpringback();
         }
         g_cfg.hotkey_active = 0;
+        g_recoil_exhausted = 0U;
     }
 
     if(g_cfg.hotkey_active != prev_active)
@@ -985,28 +1007,73 @@ static int8_t MouseBridge_ClampAxis(int16_t value)
     return (int8_t)value;
 }
 
-static int8_t MouseBridge_ConsumeModifyStep(int16_t modify_x10, int16_t *accum)
+static int8_t MouseBridge_CommitSentInjectAxis(int8_t sent, int16_t *pending)
 {
-    int8_t step = 0;
+    int16_t used;
 
-    if(modify_x10 == 0)
+    if((sent > 0 && *pending <= 0) || (sent < 0 && *pending >= 0) || sent == 0)
     {
         return 0;
     }
 
-    *accum += modify_x10;
-    while(*accum >= 10)
+    used = sent;
+    if(*pending > 0 && used > *pending)
+    {
+        used = *pending;
+    }
+    else if(*pending < 0 && used < *pending)
+    {
+        used = *pending;
+    }
+    *pending = (int16_t)(*pending - used);
+    return (int8_t)used;
+}
+
+static int8_t MouseBridge_ConsumeModifyStep(int16_t modify_x100, int16_t *accum)
+{
+    int8_t step = 0;
+
+    if(modify_x100 == 0)
+    {
+        return 0;
+    }
+
+    if(modify_x100 > MOUSE_BRIDGE_STAGE_AXIS_MAX_X100)
+    {
+        modify_x100 = MOUSE_BRIDGE_STAGE_AXIS_MAX_X100;
+    }
+    if(modify_x100 < -MOUSE_BRIDGE_STAGE_AXIS_MAX_X100)
+    {
+        modify_x100 = -MOUSE_BRIDGE_STAGE_AXIS_MAX_X100;
+    }
+
+    *accum += modify_x100;
+    while(*accum >= 100)
     {
         step++;
-        *accum = (int16_t)(*accum - 10);
+        *accum = (int16_t)(*accum - 100);
     }
-    while(*accum <= -10)
+    while(*accum <= -100)
     {
         step--;
-        *accum = (int16_t)(*accum + 10);
+        *accum = (int16_t)(*accum + 100);
     }
 
     return step;
+}
+
+static uint8_t MouseBridge_TrailingStagesIdle(uint8_t first)
+{
+    uint8_t i;
+
+    for(i = first; i < g_cfg.stage_count && i < MOUSE_BRIDGE_PROFILE_STAGES; i++)
+    {
+        if(g_cfg.stages[i].dx_x100 != 0 || g_cfg.stages[i].dy_x100 != 0)
+        {
+            return 0U;
+        }
+    }
+    return 1U;
 }
 
 static const MouseBridgeStage *MouseBridge_CurrentStage(void)
@@ -1044,6 +1111,16 @@ static const MouseBridgeStage *MouseBridge_CurrentStage(void)
         if(elapsed < sum)
         {
             g_recoil_stage_index = i;
+            /*
+             * Generated profiles can contain an all-zero tail covering the
+             * post-fire video.  Treat the first such tail stage as magazine
+             * end instead of waiting while the game's recoil falls downward.
+             */
+            if(g_cfg.stage_count > 1U &&
+               MouseBridge_TrailingStagesIdle(i))
+            {
+                return &g_zero_stage;
+            }
             return &g_cfg.stages[i];
         }
     }
@@ -1178,10 +1255,6 @@ static void MouseBridge_TryForwardRaw(const uint8_t *data, uint16_t len)
         len = MOUSE_BRIDGE_REPORT_MAX;
     }
 
-    memcpy(g_last_raw_data, data, len);
-    g_last_raw_len = len;
-    g_last_raw_ms = BridgeTime_GetMs();
-
     MouseBridge_TryFlushRaw();
     if(g_raw_q_count == 0U && MouseBridge_UsbReady() && !MouseBridge_RawEndpBusy())
     {
@@ -1203,33 +1276,6 @@ static void MouseBridge_TryForwardRaw(const uint8_t *data, uint16_t len)
     g_raw_q_count++;
 }
 
-static void MouseBridge_TryLbtnKeepalive(void)
-{
-    uint32_t now;
-
-#if MOUSE_BRIDGE_LBTN_KEEPALIVE_MS == 0U
-    return;
-#endif
-    if((g_current_buttons & 0x01U) == 0U || g_last_raw_len == 0U)
-    {
-        return;
-    }
-    if(g_raw_q_count > 0U || MouseBridge_RawEndpBusy())
-    {
-        return;
-    }
-
-    now = BridgeTime_GetMs();
-    if((now - g_last_raw_ms) < MOUSE_BRIDGE_LBTN_KEEPALIVE_MS ||
-       (now - g_last_lbtn_keepalive_ms) < MOUSE_BRIDGE_LBTN_KEEPALIVE_MS)
-    {
-        return;
-    }
-
-    g_last_lbtn_keepalive_ms = now;
-    MouseBridge_TryForwardRaw(g_last_raw_data, g_last_raw_len);
-}
-
 static void MouseBridge_TryFlush(void)
 {
     uint8_t pkt[MOUSE_BRIDGE_REPORT_MAX];
@@ -1237,6 +1283,8 @@ static void MouseBridge_TryFlush(void)
     int8_t sdx;
     int8_t sdy;
     int8_t swheel;
+    int8_t inject_dx;
+    int8_t inject_dy;
 
     if(!g_motion_dirty || !MouseBridge_UsbReady())
     {
@@ -1278,6 +1326,13 @@ static void MouseBridge_TryFlush(void)
         }
 
         BridgeDebug_LogForward(pkt, len, 1U);
+
+        inject_dx = MouseBridge_CommitSentInjectAxis(sdx, &g_pending_inject_dx);
+        inject_dy = MouseBridge_CommitSentInjectAxis(sdy, &g_pending_inject_dy);
+        if(inject_dx != 0 || inject_dy != 0)
+        {
+            MouseBridge_TrackSessionInject(inject_dx, inject_dy);
+        }
 
         g_motion_dx = (int16_t)(g_motion_dx - sdx);
         g_motion_dy = (int16_t)(g_motion_dy - sdy);
@@ -1350,20 +1405,24 @@ static void MouseBridge_InjectRecoil(void)
     {
         return;
     }
+#if (USB_PC_PORT == USB_PC_PORT_USBFS)
+    /* USBFS shares the endpoint; wait until raw reports drain there. */
     if(g_raw_q_count > 0U)
     {
         return;
     }
+#endif
 
     g_last_inject_ms = now;
     stage = MouseBridge_CurrentStage();
-    dx = MouseBridge_ConsumeModifyStep(stage->dx_x10, &g_dx_accum_x10);
-    dy = MouseBridge_ConsumeModifyStep(stage->dy_x10, &g_dy_accum_x10);
+    dx = MouseBridge_ConsumeModifyStep(stage->dx_x100, &g_dx_accum_x100);
+    dy = MouseBridge_ConsumeModifyStep(stage->dy_x100, &g_dy_accum_x100);
     if(dx == 0 && dy == 0)
     {
         return;
     }
-    MouseBridge_TrackSessionInject(dx, dy);
+    g_pending_inject_dx = MouseBridge_SatAdd16(g_pending_inject_dx, dx);
+    g_pending_inject_dy = MouseBridge_SatAdd16(g_pending_inject_dy, dy);
     MouseBridge_AccumMotion(dx, dy, 0U, 0, 0U);
 }
 
@@ -1371,18 +1430,22 @@ void MouseBridge_OnTimer1ms(void)
 {
     MouseBridge_TryFlushRaw();
     MouseBridge_TickRecoilLogic();
-    MouseBridge_TryLbtnKeepalive();
 
-    g_inject_div++;
-    if(g_inject_div >= RECOIL_INJECT_INTERVAL_MS)
+    if(g_springback_active)
     {
-        g_inject_div = 0;
-        if(g_springback_active)
+        /* Full anchor reset is already queued; finish its USB packets first. */
+        MouseBridge_TickSpringback();
+    }
+    else if(!g_springback_active && g_cfg.hotkey_active && g_recoil_start_ms == 0U)
+    {
+        MouseBridge_InjectRecoil();
+    }
+    else
+    {
+        g_inject_div++;
+        if(g_inject_div >= RECOIL_INJECT_INTERVAL_MS)
         {
-            MouseBridge_TickSpringback();
-        }
-        else
-        {
+            g_inject_div = 0;
             MouseBridge_InjectRecoil();
         }
     }

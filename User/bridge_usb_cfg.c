@@ -110,6 +110,11 @@ static void BridgeUsbCfg_HandleReport(const uint8_t *buf)
             if(cfg->cal_dpi < 100U) { cfg->cal_dpi = MOUSE_BRIDGE_DEFAULT_DPI; }
             if(cfg->game_sens_x1000 < 10U) { cfg->game_sens_x1000 = MOUSE_BRIDGE_DEFAULT_SENS_X1000; }
             if(cfg->cal_sens_x1000 < 10U) { cfg->cal_sens_x1000 = MOUSE_BRIDGE_DEFAULT_SENS_X1000; }
+            cfg->stage_count = 1U;
+            cfg->stages[0].duration_ms = 0U;
+            cfg->stages[0].dx_x100 = (int16_t)(cfg->modify_dx * 10);
+            cfg->stages[0].dy_x100 = (int16_t)(cfg->modify_dy * 10);
+            MouseBridge_OnParamsChanged();
             break;
 
         case BRIDGE_USB_CMD_SAVE:

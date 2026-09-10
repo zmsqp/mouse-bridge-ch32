@@ -9,6 +9,8 @@
 #define BRIDGE_FLASH_STAGE_SIZE   6U
 #define BRIDGE_FLASH_V5_STAGES    4U
 #define BRIDGE_FLASH_V5_SIZE      (BRIDGE_FLASH_V4_SIZE + (BRIDGE_FLASH_STAGE_SIZE * BRIDGE_FLASH_V5_STAGES))
+#define BRIDGE_FLASH_V6_STAGES    8U
+#define BRIDGE_FLASH_V6_SIZE      (BRIDGE_FLASH_V4_SIZE + (BRIDGE_FLASH_STAGE_SIZE * BRIDGE_FLASH_V6_STAGES))
 
 static uint32_t BridgeFlash_RecordSize(uint16_t version)
 {
@@ -27,6 +29,10 @@ static uint32_t BridgeFlash_RecordSize(uint16_t version)
     if(version == 5U)
     {
         return BRIDGE_FLASH_V5_SIZE;
+    }
+    if(version == 6U)
+    {
+        return BRIDGE_FLASH_V6_SIZE;
     }
     return sizeof(BridgeFlashRecord);
 }
@@ -56,6 +62,15 @@ static uint16_t BridgeFlash_Crc16(const uint8_t *data, uint32_t len)
     return crc;
 }
 
+static int16_t BridgeFlash_RoundX100ToX10(int16_t value)
+{
+    if(value >= 0)
+    {
+        return (int16_t)((value + 5) / 10);
+    }
+    return (int16_t)((value - 5) / 10);
+}
+
 static void BridgeFlash_ApplyProfileDefaults(MouseBridgeConfig *cfg)
 {
     uint8_t i;
@@ -70,12 +85,12 @@ static void BridgeFlash_ApplyProfileDefaults(MouseBridgeConfig *cfg)
     for(i = 0; i < MOUSE_BRIDGE_PROFILE_STAGES; i++)
     {
         cfg->stages[i].duration_ms = 0U;
-        cfg->stages[i].dx_x10 = 0;
-        cfg->stages[i].dy_x10 = 0;
+        cfg->stages[i].dx_x100 = 0;
+        cfg->stages[i].dy_x100 = 0;
     }
     cfg->stages[0].duration_ms = 0U;
-    cfg->stages[0].dx_x10 = cfg->modify_dx;
-    cfg->stages[0].dy_x10 = cfg->modify_dy;
+    cfg->stages[0].dx_x100 = (int16_t)(cfg->modify_dx * 10);
+    cfg->stages[0].dy_x100 = (int16_t)(cfg->modify_dy * 10);
 }
 
 static void BridgeFlash_ApplyDefaults(MouseBridgeConfig *cfg)
@@ -99,7 +114,8 @@ static uint8_t BridgeFlash_RecordValid(const BridgeFlashRecord *rec, uint16_t *v
         return 0;
     }
     if(rec->version != 1U && rec->version != 2U && rec->version != 3U &&
-       rec->version != 4U && rec->version != 5U && rec->version != BRIDGE_FLASH_VERSION)
+       rec->version != 4U && rec->version != 5U && rec->version != 6U &&
+       rec->version != BRIDGE_FLASH_VERSION)
     {
         return 0;
     }
@@ -151,23 +167,23 @@ static void BridgeFlash_NormalizeStages(MouseBridgeConfig *cfg)
 
     for(i = 0; i < cfg->stage_count; i++)
     {
-        if(cfg->stages[i].dx_x10 > 127) { cfg->stages[i].dx_x10 = 127; }
-        if(cfg->stages[i].dx_x10 < -127) { cfg->stages[i].dx_x10 = -127; }
-        if(cfg->stages[i].dy_x10 > 127) { cfg->stages[i].dy_x10 = 127; }
-        if(cfg->stages[i].dy_x10 < -127) { cfg->stages[i].dy_x10 = -127; }
+        if(cfg->stages[i].dx_x100 > MOUSE_BRIDGE_STAGE_AXIS_MAX_X100) { cfg->stages[i].dx_x100 = MOUSE_BRIDGE_STAGE_AXIS_MAX_X100; }
+        if(cfg->stages[i].dx_x100 < -MOUSE_BRIDGE_STAGE_AXIS_MAX_X100) { cfg->stages[i].dx_x100 = -MOUSE_BRIDGE_STAGE_AXIS_MAX_X100; }
+        if(cfg->stages[i].dy_x100 > MOUSE_BRIDGE_STAGE_AXIS_MAX_X100) { cfg->stages[i].dy_x100 = MOUSE_BRIDGE_STAGE_AXIS_MAX_X100; }
+        if(cfg->stages[i].dy_x100 < -MOUSE_BRIDGE_STAGE_AXIS_MAX_X100) { cfg->stages[i].dy_x100 = -MOUSE_BRIDGE_STAGE_AXIS_MAX_X100; }
     }
 
     if(cfg->stage_count == 1U &&
-       cfg->stages[0].dx_x10 == 0 &&
-       cfg->stages[0].dy_x10 == 0)
+       cfg->stages[0].dx_x100 == 0 &&
+       cfg->stages[0].dy_x100 == 0)
     {
         cfg->stages[0].duration_ms = 0U;
-        cfg->stages[0].dx_x10 = cfg->modify_dx;
-        cfg->stages[0].dy_x10 = cfg->modify_dy;
+        cfg->stages[0].dx_x100 = (int16_t)(cfg->modify_dx * 10);
+        cfg->stages[0].dy_x100 = (int16_t)(cfg->modify_dy * 10);
     }
 
-    cfg->modify_dx = cfg->stages[0].dx_x10;
-    cfg->modify_dy = cfg->stages[0].dy_x10;
+    cfg->modify_dx = BridgeFlash_RoundX100ToX10(cfg->stages[0].dx_x100);
+    cfg->modify_dy = BridgeFlash_RoundX100ToX10(cfg->stages[0].dy_x100);
 }
 
 void BridgeFlash_Load(MouseBridgeConfig *cfg)
@@ -211,19 +227,36 @@ void BridgeFlash_Load(MouseBridgeConfig *cfg)
     if(version >= 5U)
     {
         uint8_t i;
-        uint8_t saved_stages = (version == 5U) ? 4U : MOUSE_BRIDGE_PROFILE_STAGES;
+        uint8_t saved_stages = MOUSE_BRIDGE_PROFILE_STAGES;
+        if(version == 5U)
+        {
+            saved_stages = BRIDGE_FLASH_V5_STAGES;
+        }
+        else if(version == 6U)
+        {
+            saved_stages = BRIDGE_FLASH_V6_STAGES;
+        }
         cfg->stage_count = rec->stage_count;
+        if(cfg->stage_count > saved_stages)
+        {
+            cfg->stage_count = saved_stages;
+        }
         for(i = 0; i < saved_stages; i++)
         {
             cfg->stages[i] = rec->stages[i];
+            if(version < BRIDGE_FLASH_VERSION)
+            {
+                cfg->stages[i].dx_x100 = (int16_t)(cfg->stages[i].dx_x100 * 10);
+                cfg->stages[i].dy_x100 = (int16_t)(cfg->stages[i].dy_x100 * 10);
+            }
         }
     }
     else
     {
         cfg->stage_count = 1U;
         cfg->stages[0].duration_ms = 0U;
-        cfg->stages[0].dx_x10 = cfg->modify_dx;
-        cfg->stages[0].dy_x10 = cfg->modify_dy;
+        cfg->stages[0].dx_x100 = (int16_t)(cfg->modify_dx * 10);
+        cfg->stages[0].dy_x100 = (int16_t)(cfg->modify_dy * 10);
     }
     BridgeFlash_NormalizeStages(cfg);
 }
@@ -309,10 +342,10 @@ uint8_t BridgeFlash_Save(const MouseBridgeConfig *cfg)
             st = FLASH_ProgramHalfWord(addr, rec.stages[i].duration_ms);
             if(st != FLASH_COMPLETE) { FLASH_Lock(); return 0; }
             addr += 2U;
-            st = FLASH_ProgramHalfWord(addr, (uint16_t)rec.stages[i].dx_x10);
+            st = FLASH_ProgramHalfWord(addr, (uint16_t)rec.stages[i].dx_x100);
             if(st != FLASH_COMPLETE) { FLASH_Lock(); return 0; }
             addr += 2U;
-            st = FLASH_ProgramHalfWord(addr, (uint16_t)rec.stages[i].dy_x10);
+            st = FLASH_ProgramHalfWord(addr, (uint16_t)rec.stages[i].dy_x100);
             if(st != FLASH_COMPLETE) { FLASH_Lock(); return 0; }
             addr += 2U;
         }

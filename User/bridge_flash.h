@@ -7,7 +7,7 @@
 /* CH32V203C8T 64KB Flash，最后一页 4KB 专用于桥接配置 */
 #define BRIDGE_FLASH_PAGE_ADDR   0x0800F000UL
 #define BRIDGE_FLASH_MAGIC       0x53424651UL  /* 'SBFQ' */
-#define BRIDGE_FLASH_VERSION     6U
+#define BRIDGE_FLASH_VERSION     7U
 
 typedef struct __attribute__((packed))
 {

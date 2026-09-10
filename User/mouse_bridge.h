@@ -11,13 +11,14 @@
 #define MOUSE_BRIDGE_DEFAULT_DPI         800U
 #define MOUSE_BRIDGE_DEFAULT_SENS_X1000  350U
 #define MOUSE_BRIDGE_FLAG_SPRINGBACK     0x04U
-#define MOUSE_BRIDGE_PROFILE_STAGES      8U
+#define MOUSE_BRIDGE_PROFILE_STAGES      30U
+#define MOUSE_BRIDGE_STAGE_AXIS_MAX_X100 1270
 
 typedef struct
 {
     uint16_t duration_ms;
-    int16_t  dx_x10;
-    int16_t  dy_x10;
+    int16_t  dx_x100;
+    int16_t  dy_x100;
 } MouseBridgeStage;
 
 typedef struct
@@ -34,7 +35,7 @@ typedef struct
     uint16_t cal_dpi;         /* 标定 DPI */
     uint16_t cal_sens_x1000;  /* 标定灵敏度 ×1000 */
     int16_t  cal_dy_x10;      /* 标定 Y 补偿(0.1px) */
-    uint8_t  recoil_springback; /* 停火回退：撤销本次压枪注入 */
+    uint8_t  recoil_springback; /* 弹匣结束或松键后回到第一次开火的世界准星 */
     uint8_t  stage_count;
     MouseBridgeStage stages[MOUSE_BRIDGE_PROFILE_STAGES];
 } MouseBridgeConfig;

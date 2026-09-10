@@ -6,10 +6,10 @@
 #include "string.h"
 #include "stdlib.h"
 
-#define BRIDGE_CMD_LINE_MAX   160
+#define BRIDGE_CMD_LINE_MAX   640
 
 static char g_cmd_line[BRIDGE_CMD_LINE_MAX];
-static uint8_t g_cmd_len;
+static uint16_t g_cmd_len;
 
 static void BridgeUart_EnableRx(void)
 {
@@ -57,13 +57,13 @@ static void BridgeUart_SendStages(void)
     MouseBridgeConfig *cfg = MouseBridge_GetConfig();
     uint8_t i;
 
-    printf("@P,%u", (unsigned)cfg->stage_count);
+    printf("@P2,%u", (unsigned)cfg->stage_count);
     for(i = 0; i < cfg->stage_count && i < MOUSE_BRIDGE_PROFILE_STAGES; i++)
     {
         printf(",%u,%d,%d",
                (unsigned)cfg->stages[i].duration_ms,
-               (int)cfg->stages[i].dx_x10,
-               (int)cfg->stages[i].dy_x10);
+               (int)cfg->stages[i].dx_x100,
+               (int)cfg->stages[i].dy_x100);
     }
     printf("\r\n");
 }
@@ -71,6 +71,28 @@ static void BridgeUart_SendStages(void)
 static int16_t BridgeUart_ParseInt(const char *text)
 {
     return (int16_t)atoi(text);
+}
+
+static int16_t BridgeUart_ClampStageX100(int16_t value)
+{
+    if(value > MOUSE_BRIDGE_STAGE_AXIS_MAX_X100)
+    {
+        return MOUSE_BRIDGE_STAGE_AXIS_MAX_X100;
+    }
+    if(value < -MOUSE_BRIDGE_STAGE_AXIS_MAX_X100)
+    {
+        return -MOUSE_BRIDGE_STAGE_AXIS_MAX_X100;
+    }
+    return value;
+}
+
+static int16_t BridgeUart_RoundX100ToX10(int16_t value)
+{
+    if(value >= 0)
+    {
+        return (int16_t)((value + 5) / 10);
+    }
+    return (int16_t)((value - 5) / 10);
 }
 
 static void BridgeUart_HandleCommand(char *line)
@@ -130,18 +152,19 @@ static void BridgeUart_HandleCommand(char *line)
         }
         cfg->stage_count = 1U;
         cfg->stages[0].duration_ms = 0U;
-        cfg->stages[0].dx_x10 = cfg->modify_dx;
-        cfg->stages[0].dy_x10 = cfg->modify_dy;
+        cfg->stages[0].dx_x100 = (int16_t)(cfg->modify_dx * 10);
+        cfg->stages[0].dy_x100 = (int16_t)(cfg->modify_dy * 10);
 
         MouseBridge_OnParamsChanged();
         BridgeUart_SendLine("@OK,set");
         return;
     }
 
-    if(strcmp(cmd, "STG") == 0)
+    if(strcmp(cmd, "STG") == 0 || strcmp(cmd, "ST2") == 0)
     {
         uint8_t count;
         uint8_t i;
+        uint8_t precise = (strcmp(cmd, "ST2") == 0) ? 1U : 0U;
         MouseBridgeStage stages[MOUSE_BRIDGE_PROFILE_STAGES];
 
         arg1 = strtok(0, " \t");
@@ -172,22 +195,32 @@ static void BridgeUart_HandleCommand(char *line)
             if(dur_ms < 0) dur_ms = 0;
             if(dur_ms > 30000) dur_ms = 30000;
             stages[i].duration_ms = (uint16_t)dur_ms;
-            stages[i].dx_x10 = BridgeUart_ParseInt(dx);
-            stages[i].dy_x10 = BridgeUart_ParseInt(dy);
-            if(stages[i].dx_x10 > 127) stages[i].dx_x10 = 127;
-            if(stages[i].dx_x10 < -127) stages[i].dx_x10 = -127;
-            if(stages[i].dy_x10 > 127) stages[i].dy_x10 = 127;
-            if(stages[i].dy_x10 < -127) stages[i].dy_x10 = -127;
+            if(precise)
+            {
+                stages[i].dx_x100 = BridgeUart_ClampStageX100(BridgeUart_ParseInt(dx));
+                stages[i].dy_x100 = BridgeUart_ClampStageX100(BridgeUart_ParseInt(dy));
+            }
+            else
+            {
+                int16_t dx_x10 = BridgeUart_ParseInt(dx);
+                int16_t dy_x10 = BridgeUart_ParseInt(dy);
+                if(dx_x10 > 127) dx_x10 = 127;
+                if(dx_x10 < -127) dx_x10 = -127;
+                if(dy_x10 > 127) dy_x10 = 127;
+                if(dy_x10 < -127) dy_x10 = -127;
+                stages[i].dx_x100 = (int16_t)(dx_x10 * 10);
+                stages[i].dy_x100 = (int16_t)(dy_x10 * 10);
+            }
         }
         cfg->stage_count = count;
         for(i = 0; i < count; i++)
         {
             cfg->stages[i] = stages[i];
         }
-        cfg->modify_dx = cfg->stages[0].dx_x10;
-        cfg->modify_dy = cfg->stages[0].dy_x10;
+        cfg->modify_dx = BridgeUart_RoundX100ToX10(cfg->stages[0].dx_x100);
+        cfg->modify_dy = BridgeUart_RoundX100ToX10(cfg->stages[0].dy_x100);
         MouseBridge_OnParamsChanged();
-        BridgeUart_SendLine("@OK,stg");
+        BridgeUart_SendLine(precise ? "@OK,st2" : "@OK,stg");
         return;
     }
 

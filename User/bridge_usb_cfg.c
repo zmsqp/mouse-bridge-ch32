@@ -51,6 +51,8 @@ static void BridgeUsbCfg_FillStatus(uint8_t *buf, uint8_t cmd, uint8_t ack)
     buf[22] = (uint8_t)((cfg->cal_dy_x10 >> 8) & 0xFF);
     buf[23] = 0x53U;
     buf[24] = 0x42U;
+    buf[25] = live.selected_profile;
+    buf[26] = live.profile_valid_mask;
 }
 
 static void BridgeUsbCfg_HandleReport(const uint8_t *buf)
@@ -118,7 +120,20 @@ static void BridgeUsbCfg_HandleReport(const uint8_t *buf)
             break;
 
         case BRIDGE_USB_CMD_SAVE:
-            BridgeFlash_Save(cfg);
+            {
+                uint8_t i;
+                uint8_t all_mask = (uint8_t)((1U << MOUSE_BRIDGE_PROFILE_COUNT) - 1U);
+                if(MouseBridge_GetProfileValidMask() != all_mask)
+                {
+                    MouseBridge_ProfileBegin();
+                    for(i = 0; i < MOUSE_BRIDGE_PROFILE_COUNT; i++) MouseBridge_ProfileStore(i);
+                }
+                else
+                {
+                    MouseBridge_ProfileStore(MouseBridge_GetSelectedProfile());
+                }
+                MouseBridge_ProfileCommit();
+            }
             break;
 
         case BRIDGE_USB_CMD_MON:

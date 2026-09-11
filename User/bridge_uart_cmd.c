@@ -42,14 +42,16 @@ static void BridgeUart_SendStatus(void)
 {
     MouseBridgeConfig *cfg = MouseBridge_GetConfig();
 
-    printf("@S,%u,%u,%u,%d,%d,%u,%u\r\n",
+    printf("@S,%u,%u,%u,%d,%d,%u,%u,%u,%u\r\n",
            (unsigned)cfg->enabled,
            (unsigned)cfg->hotkey_active,
            (unsigned)cfg->aim_active,
            (int)cfg->modify_dx,
            (int)cfg->modify_dy,
            (unsigned)cfg->hotkey_hold_ms,
-           (unsigned)cfg->recoil_springback);
+           (unsigned)cfg->recoil_springback,
+           (unsigned)MouseBridge_GetSelectedProfile(),
+           (unsigned)MouseBridge_GetProfileValidMask());
 }
 
 static void BridgeUart_SendStages(void)
@@ -233,9 +235,84 @@ static void BridgeUart_HandleCommand(char *line)
         return;
     }
 
+    if(strcmp(cmd, "BANKBEGIN") == 0)
+    {
+        MouseBridge_ProfileBegin();
+        BridgeUart_SendLine("@OK,bank_begin");
+        return;
+    }
+
+    if(strcmp(cmd, "SLOT") == 0)
+    {
+        int16_t profile_id;
+        arg1 = strtok(0, " \t");
+        if(arg1 == 0)
+        {
+            BridgeUart_SendLine("@ERR,args");
+            return;
+        }
+        profile_id = BridgeUart_ParseInt(arg1);
+        if(profile_id < 0 || profile_id >= MOUSE_BRIDGE_PROFILE_COUNT ||
+           !MouseBridge_ProfileStore((uint8_t)profile_id))
+        {
+            BridgeUart_SendLine("@ERR,slot");
+            return;
+        }
+        printf("@OK,slot,%u\r\n", (unsigned)profile_id);
+        return;
+    }
+
+    if(strcmp(cmd, "BANKSAVE") == 0)
+    {
+        if(MouseBridge_ProfileCommit())
+        {
+            BridgeUart_SendLine("@OK,bank_flash");
+            BridgeUart_SendStatus();
+        }
+        else
+        {
+            BridgeUart_SendLine("@ERR,bank_flash");
+        }
+        return;
+    }
+
+    if(strcmp(cmd, "SEL") == 0)
+    {
+        int16_t profile_id;
+        arg1 = strtok(0, " \t");
+        profile_id = (arg1 != 0) ? BridgeUart_ParseInt(arg1) : -1;
+        if(profile_id < 0 || profile_id >= MOUSE_BRIDGE_PROFILE_COUNT ||
+           !MouseBridge_ProfileSelect((uint8_t)profile_id))
+        {
+            BridgeUart_SendLine("@ERR,profile");
+        }
+        else
+        {
+            printf("@OK,profile,%u\r\n", (unsigned)profile_id);
+            BridgeUart_SendStatus();
+        }
+        return;
+    }
+
     if(strcmp(cmd, "SAVE") == 0)
     {
-        if(BridgeFlash_Save(cfg))
+        uint8_t i;
+        uint8_t all_mask = (uint8_t)((1U << MOUSE_BRIDGE_PROFILE_COUNT) - 1U);
+
+        if(MouseBridge_GetProfileValidMask() != all_mask)
+        {
+            /* Legacy single-save mode remains useful: initialize all slots alike. */
+            MouseBridge_ProfileBegin();
+            for(i = 0; i < MOUSE_BRIDGE_PROFILE_COUNT; i++)
+            {
+                MouseBridge_ProfileStore(i);
+            }
+        }
+        else
+        {
+            MouseBridge_ProfileStore(MouseBridge_GetSelectedProfile());
+        }
+        if(MouseBridge_ProfileCommit())
         {
             BridgeUart_SendLine("@OK,flash");
             BridgeUart_SendStatus();

@@ -3,6 +3,8 @@
 
 #include "ch32v20x.h"
 
+#define MOUSE_BRIDGE_FIRMWARE_VERSION  "V0.99"
+
 #define MOUSE_BRIDGE_REPORT_DESC_MAX   512
 #define MOUSE_BRIDGE_REPORT_MAX          64
 
@@ -13,6 +15,14 @@
 #define MOUSE_BRIDGE_FLAG_SPRINGBACK     0x04U
 #define MOUSE_BRIDGE_PROFILE_STAGES      30U
 #define MOUSE_BRIDGE_STAGE_AXIS_MAX_X100 1270
+#define MOUSE_BRIDGE_PROFILE_COUNT        6U
+
+#define MOUSE_BRIDGE_GUN_AK               0U
+#define MOUSE_BRIDGE_GUN_PHANTOM          1U
+#define MOUSE_BRIDGE_GUN_ARES             2U
+#define MOUSE_BRIDGE_GUN_ODIN             3U
+#define MOUSE_BRIDGE_GUN_SPECTRE          4U
+#define MOUSE_BRIDGE_GUN_BULLDOG          5U
 
 typedef struct
 {
@@ -45,6 +55,8 @@ typedef struct
     uint8_t aim_active;
     uint8_t recoil_active;
     uint8_t buttons;
+    uint8_t selected_profile;
+    uint8_t profile_valid_mask;
 } MouseBridgeLiveState;
 
 void MouseBridge_Init(void);
@@ -61,5 +73,11 @@ void MouseBridge_GetLiveState(MouseBridgeLiveState *state);
 MouseBridgeConfig *MouseBridge_GetConfig(void);
 void MouseBridge_OnParamsChanged(void);
 void MouseBridge_SetRawDebug(uint8_t enabled);
+void MouseBridge_ProfileBegin(void);
+uint8_t MouseBridge_ProfileStore(uint8_t profile_id);
+uint8_t MouseBridge_ProfileCommit(void);
+uint8_t MouseBridge_ProfileSelect(uint8_t profile_id);
+uint8_t MouseBridge_GetSelectedProfile(void);
+uint8_t MouseBridge_GetProfileValidMask(void);
 
 #endif

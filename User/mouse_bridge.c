@@ -3,6 +3,7 @@
 #include "usb_bridge_config.h"
 #include "bridge_time.h"
 #include "bridge_flash.h"
+#include "led_indicator.h"
 #include "stdio.h"
 #include "string.h"
 
@@ -25,6 +26,9 @@ extern uint8_t USBD_ENDPx_DataUp(uint8_t endp, uint8_t *pbuf, uint16_t len);
 #endif
 
 static MouseBridgeConfig g_cfg;
+static MouseBridgeConfig g_profiles[MOUSE_BRIDGE_PROFILE_COUNT];
+static uint8_t g_profile_valid_mask;
+static uint8_t g_selected_profile;
 
 /* Host 接收器端点包长（可为 64）；PC 侧 USBD 鼠标描述符固定 4 字节 */
 static uint16_t g_host_ep_max = 4;
@@ -63,11 +67,18 @@ static uint8_t g_pending_wheel_reports;
 
 #define RECOIL_INJECT_INTERVAL_MS  2U
 #define PRIMARY_BUTTON_MASK        0x07U
+#define BUTTON_LEFT_MASK           0x01U
+#define BUTTON_RIGHT_MASK          0x02U
+#define BUTTON_MIDDLE_MASK         0x04U
+#define BUTTON_REAR_MASK           0x08U
+#define BUTTON_FRONT_MASK          0x10U
 #define AIM_TOGGLE_DEFAULT_MASK    0x10U
 #define AIM_TOGGLE_DEBOUNCE_MS     180U
 
 static uint8_t g_aim_btn_was_down;
 static uint8_t g_aim_button_mask;
+static uint8_t g_control_prev_buttons;
+static uint8_t g_suppressed_buttons;
 static uint32_t g_last_aim_toggle_ms;
 static uint8_t g_current_buttons;
 static uint8_t g_forward_buttons;
@@ -122,6 +133,10 @@ static const MouseBridgeStage *MouseBridge_CurrentStage(void);
 static void MouseBridge_LogRawReport(const uint8_t *data, uint16_t len,
                                      uint8_t parsed, uint8_t buttons,
                                      int16_t dx, int16_t dy, int8_t wheel);
+static void MouseBridge_UpdateLed(void);
+static uint8_t MouseBridge_SelectProfileInternal(uint8_t profile_id, uint8_t notify);
+static void MouseBridge_ScrubControlReport(uint8_t *raw, uint16_t raw_len,
+                                           uint8_t buttons, int8_t wheel);
 
 static int16_t MouseBridge_RoundX100ToX10(int16_t value)
 {
@@ -159,6 +174,30 @@ static void MouseBridge_NotifyHotkeyChange(void)
     printf("@H,%u\r\n", (unsigned)g_cfg.hotkey_active);
 #endif
     g_stream_last_ms = 0;
+}
+
+static void MouseBridge_NotifyProfileChange(void)
+{
+#if MOUSE_BRIDGE_STATUS_UART
+    printf("@G,%u,%u\r\n", (unsigned)g_selected_profile,
+           (unsigned)g_profile_valid_mask);
+#endif
+}
+
+static void MouseBridge_UpdateLed(void)
+{
+    if(!g_cfg.enabled || !g_cfg.aim_active)
+    {
+        LED_Indicator_SetMode(LED_INDICATOR_OFF);
+    }
+    else if(g_cfg.hotkey_active)
+    {
+        LED_Indicator_SetMode(LED_INDICATOR_FAST);
+    }
+    else
+    {
+        LED_Indicator_SetMode(LED_INDICATOR_ON);
+    }
 }
 
 static void MouseBridge_LogRawReport(const uint8_t *data, uint16_t len,
@@ -213,8 +252,12 @@ static void MouseBridge_LogRawReport(const uint8_t *data, uint16_t len,
 
 void MouseBridge_Init(void)
 {
+    uint8_t default_profile = MOUSE_BRIDGE_GUN_AK;
+
     g_aim_btn_was_down = 0;
     g_aim_button_mask = AIM_TOGGLE_DEFAULT_MASK;
+    g_control_prev_buttons = 0U;
+    g_suppressed_buttons = 0U;
     g_last_aim_toggle_ms = 0;
     g_motion_dx = 0;
     g_motion_dy = 0;
@@ -249,7 +292,9 @@ void MouseBridge_Init(void)
     g_raw_q_read = 0;
     g_raw_q_write = 0;
     g_raw_q_count = 0;
-    BridgeFlash_Load(&g_cfg);
+    BridgeFlash_LoadBank(g_profiles, &g_profile_valid_mask, &default_profile);
+    g_selected_profile = default_profile;
+    memcpy(&g_cfg, &g_profiles[g_selected_profile], sizeof(g_cfg));
     /* Returning to the firing anchor is a required safety invariant. */
     g_cfg.recoil_springback = 1U;
     MouseBridge_ApplyDefaultLayout();
@@ -259,6 +304,7 @@ void MouseBridge_Init(void)
     g_cfg.hotkey_active = 0;
     g_cfg.aim_active = 0;
     g_cfg.monitor_stream = 0;
+    MouseBridge_UpdateLed();
 
 #if (USB_PC_PORT == USB_PC_PORT_USBFS)
     USBFS_LoadDefaultReportDescriptor();
@@ -279,11 +325,75 @@ void MouseBridge_GetLiveState(MouseBridgeLiveState *state)
     state->aim_active = g_cfg.aim_active;
     state->recoil_active = g_cfg.hotkey_active;
     state->buttons = g_current_buttons;
+    state->selected_profile = g_selected_profile;
+    state->profile_valid_mask = g_profile_valid_mask;
 }
 
 MouseBridgeConfig *MouseBridge_GetConfig(void)
 {
     return &g_cfg;
+}
+
+uint8_t MouseBridge_GetSelectedProfile(void)
+{
+    return g_selected_profile;
+}
+
+uint8_t MouseBridge_GetProfileValidMask(void)
+{
+    return g_profile_valid_mask;
+}
+
+void MouseBridge_ProfileBegin(void)
+{
+    if(g_session_inject_dx != 0 || g_session_inject_dy != 0 ||
+       g_pending_inject_dx != 0 || g_pending_inject_dy != 0)
+    {
+        MouseBridge_StartSpringback();
+    }
+    else
+    {
+        MouseBridge_ResetRecoilSession();
+    }
+    g_cfg.hotkey_active = 0U;
+    g_cfg.aim_active = 0U;
+    g_profile_valid_mask = 0U;
+    MouseBridge_UpdateLed();
+}
+
+uint8_t MouseBridge_ProfileStore(uint8_t profile_id)
+{
+    if(profile_id >= MOUSE_BRIDGE_PROFILE_COUNT)
+    {
+        return 0U;
+    }
+    memcpy(&g_profiles[profile_id], &g_cfg, sizeof(g_cfg));
+    g_profiles[profile_id].hotkey_active = 0U;
+    g_profiles[profile_id].aim_active = 0U;
+    g_profiles[profile_id].monitor_stream = 0U;
+    g_profile_valid_mask |= (uint8_t)(1U << profile_id);
+    return 1U;
+}
+
+uint8_t MouseBridge_ProfileCommit(void)
+{
+    uint8_t saved;
+
+    if(g_profile_valid_mask != (uint8_t)((1U << MOUSE_BRIDGE_PROFILE_COUNT) - 1U))
+    {
+        return 0U;
+    }
+    saved = BridgeFlash_SaveBank(g_profiles, g_profile_valid_mask, MOUSE_BRIDGE_GUN_AK);
+    if(saved)
+    {
+        MouseBridge_SelectProfileInternal(MOUSE_BRIDGE_GUN_AK, 1U);
+    }
+    return saved;
+}
+
+uint8_t MouseBridge_ProfileSelect(uint8_t profile_id)
+{
+    return MouseBridge_SelectProfileInternal(profile_id, 1U);
 }
 
 void MouseBridge_SetRawDebug(uint8_t enabled)
@@ -315,6 +425,7 @@ void MouseBridge_OnParamsChanged(void)
     {
         g_cfg.aim_active = 0;
     }
+    MouseBridge_UpdateLed();
 }
 
 void MouseBridge_SetReportDescriptor(const uint8_t *src, uint16_t len)
@@ -814,6 +925,54 @@ static void MouseBridge_ResetRecoilSession(void)
     MouseBridge_ResetRecoilAccum();
 }
 
+static uint8_t MouseBridge_SelectProfileInternal(uint8_t profile_id, uint8_t notify)
+{
+    uint8_t enabled;
+    uint8_t monitor;
+    uint8_t was_aim;
+
+    if(profile_id >= MOUSE_BRIDGE_PROFILE_COUNT ||
+       (g_profile_valid_mask & (uint8_t)(1U << profile_id)) == 0U)
+    {
+        return 0U;
+    }
+
+    enabled = g_cfg.enabled;
+    monitor = g_cfg.monitor_stream;
+    was_aim = g_cfg.aim_active;
+    if(g_session_inject_dx != 0 || g_session_inject_dy != 0 ||
+       g_pending_inject_dx != 0 || g_pending_inject_dy != 0)
+    {
+        MouseBridge_StartSpringback();
+    }
+    else
+    {
+        MouseBridge_ResetRecoilSession();
+    }
+
+    memcpy(&g_cfg, &g_profiles[profile_id], sizeof(g_cfg));
+    g_cfg.enabled = enabled;
+    g_cfg.monitor_stream = monitor;
+    g_cfg.recoil_springback = 1U;
+    g_cfg.hotkey_active = 0U;
+    /* Every gun change is deliberately disarmed; front side must be pressed once. */
+    g_cfg.aim_active = 0U;
+    g_selected_profile = profile_id;
+    MouseBridge_ResetRecoilAccum();
+    g_recoil_start_ms = 0U;
+    g_recoil_stage_index = 0U;
+    g_recoil_exhausted = 0U;
+    MouseBridge_UpdateLed();
+    LED_Indicator_PulseSelection();
+
+    if(notify)
+    {
+        MouseBridge_NotifyProfileChange();
+        if(was_aim) MouseBridge_NotifyAimChange();
+    }
+    return 1U;
+}
+
 static int16_t MouseBridge_SatAdd16(int16_t base, int8_t delta)
 {
     int32_t sum = (int32_t)base + (int32_t)delta;
@@ -882,24 +1041,114 @@ static void MouseBridge_TickSpringback(void)
     }
 }
 
-static void MouseBridge_HandleButtons(uint8_t buttons)
+static void MouseBridge_ClearReportBits(uint8_t *raw, uint16_t raw_len,
+                                        uint16_t first_bit, uint8_t count)
 {
-    uint8_t lbtn = (uint8_t)(buttons & 0x01U);
+    uint8_t *payload = raw;
+    uint16_t payload_len = raw_len;
+    uint8_t i;
+
+    if(g_layout.has_report_id)
+    {
+        if(raw_len < 2U || raw[0] != g_layout.report_id) return;
+        payload = raw + 1U;
+        payload_len--;
+    }
+    for(i = 0; i < count; i++)
+    {
+        uint16_t bit = (uint16_t)(first_bit + i);
+        uint16_t byte_pos = (uint16_t)(bit >> 3);
+        if(byte_pos >= payload_len) break;
+        payload[byte_pos] &= (uint8_t)~(1U << (bit & 0x07U));
+    }
+}
+
+static void MouseBridge_ScrubControlReport(uint8_t *raw, uint16_t raw_len,
+                                           uint8_t buttons, int8_t wheel)
+{
+    uint8_t suppress = (uint8_t)(BUTTON_FRONT_MASK | g_suppressed_buttons);
+    uint8_t i;
+
+    if((buttons & BUTTON_MIDDLE_MASK) != 0U) suppress |= BUTTON_MIDDLE_MASK;
+    for(i = 0; i < g_layout.btn_count && i < 8U; i++)
+    {
+        if((suppress & (uint8_t)(1U << i)) != 0U)
+        {
+            MouseBridge_ClearReportBits(raw, raw_len, (uint16_t)(g_layout.btn_bit + i), 1U);
+        }
+    }
+    if((buttons & BUTTON_MIDDLE_MASK) != 0U && wheel != 0 && g_layout.wheel_size > 0U)
+    {
+        MouseBridge_ClearReportBits(raw, raw_len, g_layout.wheel_bit, g_layout.wheel_size);
+    }
+}
+
+static void MouseBridge_HandleButtons(uint8_t buttons, int8_t wheel)
+{
+    uint8_t lbtn = (uint8_t)(buttons & BUTTON_LEFT_MASK);
     uint8_t aim_btn;
+    uint8_t middle = (uint8_t)(buttons & BUTTON_MIDDLE_MASK);
+    uint8_t middle_rising = (uint8_t)(middle && !(g_control_prev_buttons & BUTTON_MIDDLE_MASK));
+    uint8_t selector_mask = 0U;
+    uint8_t requested_profile = 0xFFU;
     uint32_t now = BridgeTime_GetMs();
     uint8_t aim_debounce_ok = (g_last_aim_toggle_ms == 0U ||
                                (now - g_last_aim_toggle_ms) >= AIM_TOGGLE_DEBOUNCE_MS);
 
     g_aim_button_mask = AIM_TOGGLE_DEFAULT_MASK;
+    g_suppressed_buttons &= buttons;
     aim_btn = (uint8_t)((buttons & AIM_TOGGLE_DEFAULT_MASK) ? 1U : 0U);
-    if(aim_btn && !g_aim_btn_was_down && aim_debounce_ok)
+    if(middle)
+    {
+        if((buttons & BUTTON_FRONT_MASK) &&
+           (middle_rising || !(g_control_prev_buttons & BUTTON_FRONT_MASK)))
+        {
+            requested_profile = MOUSE_BRIDGE_GUN_AK;
+            selector_mask = BUTTON_FRONT_MASK;
+        }
+        else if((buttons & BUTTON_REAR_MASK) &&
+                (middle_rising || !(g_control_prev_buttons & BUTTON_REAR_MASK)))
+        {
+            requested_profile = MOUSE_BRIDGE_GUN_PHANTOM;
+            selector_mask = BUTTON_REAR_MASK;
+        }
+        else if((buttons & BUTTON_LEFT_MASK) &&
+                (middle_rising || !(g_control_prev_buttons & BUTTON_LEFT_MASK)))
+        {
+            requested_profile = MOUSE_BRIDGE_GUN_ARES;
+            selector_mask = BUTTON_LEFT_MASK;
+        }
+        else if((buttons & BUTTON_RIGHT_MASK) &&
+                (middle_rising || !(g_control_prev_buttons & BUTTON_RIGHT_MASK)))
+        {
+            requested_profile = MOUSE_BRIDGE_GUN_ODIN;
+            selector_mask = BUTTON_RIGHT_MASK;
+        }
+        else if(wheel > 0)
+        {
+            requested_profile = MOUSE_BRIDGE_GUN_SPECTRE;
+        }
+        else if(wheel < 0)
+        {
+            requested_profile = MOUSE_BRIDGE_GUN_BULLDOG;
+        }
+
+        g_suppressed_buttons |= (uint8_t)(BUTTON_MIDDLE_MASK | selector_mask);
+        if(requested_profile != 0xFFU)
+        {
+            MouseBridge_SelectProfileInternal(requested_profile, 1U);
+        }
+    }
+    else if(aim_btn && !g_aim_btn_was_down && aim_debounce_ok)
     {
         g_cfg.aim_active = g_cfg.aim_active ? 0U : 1U;
         g_last_aim_toggle_ms = now;
         MouseBridge_NotifyAimChange();
+        MouseBridge_UpdateLed();
     }
 
     g_aim_btn_was_down = aim_btn;
+    g_control_prev_buttons = buttons;
 
     if(lbtn && !g_lbtn_was_down)
     {
@@ -918,6 +1167,7 @@ static void MouseBridge_HandleButtons(uint8_t buttons)
             if(was_active != g_cfg.hotkey_active)
             {
                 MouseBridge_NotifyHotkeyChange();
+                MouseBridge_UpdateLed();
             }
         }
     }
@@ -991,6 +1241,7 @@ static void MouseBridge_TickRecoilLogic(void)
     if(g_cfg.hotkey_active != prev_active)
     {
         MouseBridge_NotifyHotkeyChange();
+        MouseBridge_UpdateLed();
     }
 }
 
@@ -1365,7 +1616,7 @@ static void MouseBridge_DispatchReport(uint8_t buttons, int16_t dx, int16_t dy, 
     {
         if(g_cfg.enabled)
         {
-            MouseBridge_HandleButtons(buttons);
+            MouseBridge_HandleButtons(buttons, wheel);
             out_buttons = (uint8_t)(buttons & (uint8_t)~g_aim_button_mask);
         }
         else
@@ -1461,16 +1712,17 @@ void MouseBridge_ForwardReport(const uint8_t *data, uint16_t len)
     int16_t dy;
     int8_t wheel;
     uint8_t parsed;
+    uint8_t forwarded[MOUSE_BRIDGE_REPORT_MAX];
+    uint16_t forwarded_len;
 
     if(data == 0 || len == 0)
     {
         return;
     }
 
-    MouseBridge_TryForwardRaw(data, len);
-
     if(!g_cfg.enabled && !g_raw_debug)
     {
+        MouseBridge_TryForwardRaw(data, len);
         return;
     }
 
@@ -1478,14 +1730,15 @@ void MouseBridge_ForwardReport(const uint8_t *data, uint16_t len)
     dx = 0;
     dy = 0;
     wheel = 0;
-    parsed = MouseBridge_ExtractButtons(data, len, &buttons);
-    if(g_raw_debug || !parsed)
+    parsed = MouseBridge_ExtractReport(data, len, &buttons, &dx, &dy, &wheel);
+    if(!parsed)
     {
-        parsed = MouseBridge_ExtractReport(data, len, &buttons, &dx, &dy, &wheel);
+        parsed = MouseBridge_ExtractButtons(data, len, &buttons);
     }
 
     if(!parsed)
     {
+        MouseBridge_TryForwardRaw(data, len);
         MouseBridge_LogRawReport(data, len, 0U, 0U, 0, 0, 0);
         BridgeDebug_LogDrop("parse", data, len);
         return;
@@ -1494,11 +1747,16 @@ void MouseBridge_ForwardReport(const uint8_t *data, uint16_t len)
     MouseBridge_LogRawReport(data, len, 1U, buttons, dx, dy, wheel);
     if(g_cfg.enabled)
     {
-        MouseBridge_HandleButtons(buttons);
+        MouseBridge_HandleButtons(buttons, wheel);
+        forwarded_len = (len > MOUSE_BRIDGE_REPORT_MAX) ? MOUSE_BRIDGE_REPORT_MAX : len;
+        memcpy(forwarded, data, forwarded_len);
+        MouseBridge_ScrubControlReport(forwarded, forwarded_len, buttons, wheel);
+        MouseBridge_TryForwardRaw(forwarded, forwarded_len);
     }
     else
     {
         g_current_buttons = buttons;
+        MouseBridge_TryForwardRaw(data, len);
     }
     g_forward_buttons = buttons;
 }

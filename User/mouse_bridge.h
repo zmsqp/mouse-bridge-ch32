@@ -76,6 +76,7 @@ void MouseBridge_SetRawDebug(uint8_t enabled);
 void MouseBridge_ProfileBegin(void);
 uint8_t MouseBridge_ProfileStore(uint8_t profile_id);
 uint8_t MouseBridge_ProfileCommit(void);
+uint8_t MouseBridge_ProfileCommitBank(const MouseBridgeConfig profiles[MOUSE_BRIDGE_PROFILE_COUNT]);
 uint8_t MouseBridge_ProfileSelect(uint8_t profile_id);
 uint8_t MouseBridge_GetSelectedProfile(void);
 uint8_t MouseBridge_GetProfileValidMask(void);

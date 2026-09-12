@@ -391,6 +391,20 @@ uint8_t MouseBridge_ProfileCommit(void)
     return saved;
 }
 
+uint8_t MouseBridge_ProfileCommitBank(const MouseBridgeConfig profiles[MOUSE_BRIDGE_PROFILE_COUNT])
+{
+    uint8_t all_mask = (uint8_t)((1U << MOUSE_BRIDGE_PROFILE_COUNT) - 1U);
+
+    if(profiles == 0 ||
+       !BridgeFlash_SaveBank(profiles, all_mask, MOUSE_BRIDGE_GUN_AK))
+    {
+        return 0U;
+    }
+    memcpy(g_profiles, profiles, sizeof(g_profiles));
+    g_profile_valid_mask = all_mask;
+    return MouseBridge_SelectProfileInternal(MOUSE_BRIDGE_GUN_AK, 1U);
+}
+
 uint8_t MouseBridge_ProfileSelect(uint8_t profile_id)
 {
     return MouseBridge_SelectProfileInternal(profile_id, 1U);

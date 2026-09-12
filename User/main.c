@@ -4,6 +4,7 @@
 #include "bridge_debug.h"
 #include "bridge_uart_cmd.h"
 #include "bridge_usb_cfg.h"
+#include "bridge_usb_import.h"
 #include "bridge_time.h"
 #include "ch32v20x_conf.h"
 #include "string.h"
@@ -43,6 +44,7 @@ int main(void)
     BridgeDebug_Init();
     BridgeTime_Init();
     BridgeUsbCfg_Init();
+    BridgeUsbImport_Init();
     BridgeUart_Init(BRIDGE_DEBUG_BAUD);
 
     MouseBridge_Init();
@@ -104,6 +106,7 @@ int main(void)
         MouseBridge_Poll();
         BridgeUart_Poll();
         BridgeUsbCfg_Poll();
+        BridgeUsbImport_Poll();
         BridgeDebug_Flush();
     }
 }

@@ -17,9 +17,10 @@
 #define DEF_ENDP_SIZE_KB            8
 #define DEF_ENDP_SIZE_MS           64
 #define DEF_ENDP_SIZE_INJECT        3
+#define DEF_ENDP_SIZE_CFG            8
 
 #define USBD_SIZE_DEVICE_DESC        18
-#define USBD_SIZE_CONFIG_DESC        59
+#define USBD_SIZE_CONFIG_DESC        84
 #define USBD_SIZE_REPORT_DESC_KB     62
 #define USBD_SIZE_REPORT_DESC_MS     52
 #define USBD_SIZE_REPORT_DESC_INJECT 28

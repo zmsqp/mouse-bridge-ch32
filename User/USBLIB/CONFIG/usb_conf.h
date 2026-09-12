@@ -14,7 +14,7 @@
 #define __USB_CONF_H
 
 
-#define EP_NUM                          (3)
+#define EP_NUM                          (4)
 
 /* Buffer Description Table */
 /* buffer table base address */
@@ -30,6 +30,7 @@
 /* tx buffer base address */
 #define ENDP1_TXADDR        (0xC0)
 #define ENDP2_TXADDR        (ENDP1_TXADDR + 0x40)
+#define ENDP3_TXADDR        (ENDP2_TXADDR + 0x40)
 
 /* ISTR events */
 /* IMR_MSK */
@@ -67,7 +68,6 @@
 #define  EP7_OUT_Callback   NOP_Process
 
 #endif /* __USB_CONF_H */
-
 
 
 

@@ -6,6 +6,7 @@
 #include "bridge_usb_cfg.h"
 #include "bridge_usb_import.h"
 #include "bridge_time.h"
+#include "iap_app.h"
 #include "ch32v20x_conf.h"
 #include "string.h"
 
@@ -22,6 +23,8 @@
 
 #include "usb_host_config.h"
 
+#define APP_PC_USB_FALLBACK_MS 3000UL
+
 /*
  * PC 侧 USBD（固定引脚，软件无法对调 D+/D-）：
  *   PA11 = USBDM = D-
@@ -36,6 +39,7 @@ int main(void)
 {
     static uint8_t pc_started = 0;
     static uint8_t pc_ready = 0;
+    static uint32_t pc_start_deadline = 0U;
 
     NVIC_PriorityGroupConfig(NVIC_PriorityGroup_1);
     SystemCoreClockUpdate();
@@ -45,6 +49,7 @@ int main(void)
     BridgeTime_Init();
     BridgeUsbCfg_Init();
     BridgeUsbImport_Init();
+    IapApp_Init();
     BridgeUart_Init(BRIDGE_DEBUG_BAUD);
 
     MouseBridge_Init();
@@ -57,6 +62,8 @@ int main(void)
     memset(&RootHubDev.bStatus, 0, sizeof(ROOT_HUB_DEVICE));
     memset(&HostCtl[DEF_USBFS_PORT_INDEX * DEF_ONE_USB_SUP_DEV_TOTAL].InterfaceNum, 0,
            DEF_ONE_USB_SUP_DEV_TOTAL * sizeof(HOST_CTL));
+    pc_start_deadline = BridgeTime_GetMs() + APP_PC_USB_FALLBACK_MS;
+    LED_Indicator_SetMode(LED_INDICATOR_SLOW);
 #elif (USB_PC_PORT == USB_PC_PORT_USBFS)
     USBFS_Device_Init(ENABLE);
 #endif
@@ -76,7 +83,8 @@ int main(void)
                 USBH_MainDeal();
             }
 
-            if(RootHubDev.bStatus == ROOT_DEV_SUCCESS)
+            if(RootHubDev.bStatus == ROOT_DEV_SUCCESS ||
+               (int32_t)(BridgeTime_GetMs() - pc_start_deadline) >= 0)
             {
                 fSuspendEnabled = FALSE;
                 Set_USBConfig();
@@ -84,11 +92,13 @@ int main(void)
                 USB_Interrupts_Config();
                 BridgeDebug_LogUsbInit();
                 pc_started = 1;
+                LED_Indicator_SetMode(LED_INDICATOR_OFF);
             }
         }
         else if(!pc_ready && bDeviceState == CONFIGURED)
         {
             pc_ready = 1;
+            (void)IapApp_ConfirmRunning();
             BridgeDebug_LogPcHostReady();
         }
         else if(pc_ready)

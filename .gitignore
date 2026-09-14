@@ -1,5 +1,11 @@
 # MounRiver / GCC build output
 /obj/
+/build-app/
+/Bootloader/build/
+/Bootloader/obj/
+/Bootloader/
+/release/*.hex
+/release/*.bin
 *.o
 *.d
 *.hex

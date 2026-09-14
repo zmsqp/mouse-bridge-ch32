@@ -1,6 +1,8 @@
 #include "bridge_usb_import.h"
 #include "bridge_time.h"
 #include "mouse_bridge.h"
+#include "iap_app.h"
+#include "iap_layout.h"
 #include "string.h"
 
 #define BRIDGE_USB_IMPORT_PROTOCOL_VERSION  1U
@@ -56,6 +58,14 @@ static void BridgeUsbImport_WriteU16(uint8_t *p, uint16_t value)
 {
     p[0] = (uint8_t)(value & 0xFFU);
     p[1] = (uint8_t)(value >> 8);
+}
+
+static void BridgeUsbImport_WriteU32(uint8_t *p, uint32_t value)
+{
+    p[0] = (uint8_t)(value & 0xFFU);
+    p[1] = (uint8_t)((value >> 8) & 0xFFU);
+    p[2] = (uint8_t)((value >> 16) & 0xFFU);
+    p[3] = (uint8_t)(value >> 24);
 }
 
 static uint16_t BridgeUsbImport_Crc16(const uint8_t *data, uint16_t len)
@@ -148,6 +158,7 @@ static void BridgeUsbImport_SetResponse(uint8_t cmd, uint8_t session, uint8_t se
     BridgeUsbImport_WriteU16(&g_usb_import_response[28], cfg->cal_sens_x1000);
     BridgeUsbImport_WriteU16(&g_usb_import_response[30], (uint16_t)cfg->cal_dy_x10);
     g_usb_import_response[32] = detail;
+    BridgeUsbImport_WriteU32(&g_usb_import_response[33], IAP_APP_VERSION_CODE);
     crc = BridgeUsbImport_Crc16(g_usb_import_response, 61U);
     BridgeUsbImport_WriteU16(&g_usb_import_response[61], crc);
 }
@@ -466,6 +477,26 @@ static void BridgeUsbImport_HandlePacket(const uint8_t *buf)
             BridgeUsbImport_SetResponse(cmd, buf[5], buf[6], BRIDGE_USB_IMPORT_STATUS_OK, 0U);
             break;
 
+        case BRIDGE_USB_IMPORT_CMD_ENTER_IAP:
+            if(g_usb_import_active)
+            {
+                BridgeUsbImport_SetResponse(cmd, buf[5], buf[6], BRIDGE_USB_IMPORT_ERR_BUSY, 0U);
+                break;
+            }
+            if(!BridgeUsbImport_DataMatches(buf, "ENTERIAP", 8U))
+            {
+                BridgeUsbImport_SetResponse(cmd, buf[5], buf[6], BRIDGE_USB_IMPORT_ERR_PACKET, 0U);
+                break;
+            }
+            if(!IapApp_RequestBootloader())
+            {
+                BridgeUsbImport_SetResponse(cmd, buf[5], buf[6], BRIDGE_USB_IMPORT_ERR_BUSY, 0U);
+                break;
+            }
+            BridgeUsbImport_SetResponse(cmd, buf[5], buf[6],
+                                        BRIDGE_USB_IMPORT_STATUS_IAP_READY, 0U);
+            break;
+
         default:
             BridgeUsbImport_SetResponse(cmd, buf[5], buf[6], BRIDGE_USB_IMPORT_ERR_COMMAND, cmd);
             break;
@@ -520,4 +551,5 @@ void BridgeUsbImport_Poll(void)
         BridgeUsbImport_SetResponse(BRIDGE_USB_IMPORT_CMD_ABORT, old_session, old_seq,
                                     BRIDGE_USB_IMPORT_ERR_TIMEOUT, 0U);
     }
+    IapApp_Poll();
 }
